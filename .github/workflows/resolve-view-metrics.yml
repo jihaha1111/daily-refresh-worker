@@ -329,7 +329,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p shards
-          rclone copyto "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shards/$GITHUB_RUN_ID/shard-${SHARD}.tsv" "shards/shard-${SHARD}.tsv"
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then return 1; fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          rclone_retry rclone --contimeout 10s --timeout 90s copyto "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shards/$GITHUB_RUN_ID/shard-${SHARD}.tsv" "shards/shard-${SHARD}.tsv"
           test -s "shards/shard-${SHARD}.tsv"
 
       - name: Probe view metrics
@@ -370,8 +380,18 @@ jobs:
         run: |
           set -euo pipefail
           destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shard-results/$GITHUB_RUN_ID"
-          rclone mkdir "$destination"
-          rclone copyto "shard-results/shard-${SHARD}.csv" "$destination/shard-${SHARD}.csv"
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then return 1; fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          rclone_retry rclone mkdir "$destination"
+          rclone_retry rclone --contimeout 10s --timeout 90s copyto "shard-results/shard-${SHARD}.csv" "$destination/shard-${SHARD}.csv"
 
   finalize:
     name: merge and upload view metrics
@@ -416,9 +436,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p prepared shard-results
-          rclone copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-prepared/$GITHUB_RUN_ID" prepared
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then return 1; fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          rclone_retry rclone --contimeout 10s --timeout 90s copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-prepared/$GITHUB_RUN_ID" prepared
           if [ "$HAS_WORK" = "true" ]; then
-            rclone copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shard-results/$GITHUB_RUN_ID" shard-results
+            rclone_retry rclone --contimeout 10s --timeout 90s copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shard-results/$GITHUB_RUN_ID" shard-results
             test -n "$(find shard-results -name 'shard-*.csv' -print -quit)"
           fi
 
@@ -468,7 +498,17 @@ jobs:
           cp "view-results/view-lookup-results-${TARGET_DATE}.csv" drive-upload/
           cp "view-results/threads-viewcount-${TARGET_DATE}.csv" drive-upload/
           cp "view-results/view-lookup-manifest-${TARGET_DATE}.json" drive-upload/
-          rclone mkdir "$destination"
-          rclone copy drive-upload "$destination"
-          rclone mkdir "$retry_destination"
-          rclone copy view-results/retry-state "$retry_destination"
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then return 1; fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          rclone_retry rclone mkdir "$destination"
+          rclone_retry rclone --contimeout 10s --timeout 90s copy drive-upload "$destination"
+          rclone_retry rclone mkdir "$retry_destination"
+          rclone_retry rclone --contimeout 10s --timeout 90s copy view-results/retry-state "$retry_destination"
