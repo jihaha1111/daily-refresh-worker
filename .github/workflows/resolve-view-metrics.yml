@@ -1,0 +1,474 @@
+name: Resolve View Metrics
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Run date for Drive input/output filename"
+        required: true
+        default: "260430"
+      source_run_id:
+        description: "Previous public runner workflow run ID for retry mode; leave empty for initial mode"
+        required: false
+        default: ""
+      max_parallel:
+        description: "Maximum concurrent shard jobs"
+        required: true
+        default: "1"
+      shard_size:
+        description: "Rows per shard"
+        required: true
+        default: "50"
+      target_shard_count:
+        description: "Optional exact balanced shard count. 0 keeps shard_size chunking."
+        required: true
+        default: "0"
+      max_rows:
+        description: "Smoke limit. 0 processes all rows."
+        required: true
+        default: "10"
+      probe_mode:
+        description: "Probe implementation: static, scrapling-dynamic, or scrapling-stealth"
+        required: true
+        default: "scrapling-dynamic"
+      timeout_seconds:
+        description: "Per-request timeout"
+        required: true
+        default: "20"
+      fetch_attempts:
+        description: "Fetch attempts per URL before marking request_error"
+        required: true
+        default: "2"
+      missing_count_attempts:
+        description: "Rendered retries when HTTP 200 has no parseable view count"
+        required: true
+        default: "2"
+      missing_count_sleep_seconds:
+        description: "Delay between missing-count rendered retries"
+        required: true
+        default: "2"
+      sleep_seconds:
+        description: "Delay between requests inside each shard"
+        required: true
+        default: "1"
+      progress_interval:
+        description: "Sanitized progress log interval"
+        required: true
+        default: "5"
+      log_diagnostics:
+        description: "Log sanitized row diagnostics without raw URLs"
+        required: true
+        default: "false"
+      upload_to_drive:
+        description: "Required for public operational runs"
+        required: true
+        default: "true"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resolve-view-metrics-${{ inputs.target_date }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare view metric shards
+    runs-on: ubuntu-22.04
+    outputs:
+      has_work: ${{ steps.state.outputs.has_work }}
+      matrix: ${{ steps.state.outputs.matrix }}
+      total_rows: ${{ steps.state.outputs.total_rows }}
+      shard_count: ${{ steps.state.outputs.shard_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate inputs and configuration
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          SHARD_SIZE: ${{ inputs.shard_size }}
+          TARGET_SHARD_COUNT: ${{ inputs.target_shard_count }}
+          MAX_ROWS: ${{ inputs.max_rows }}
+          PROBE_MODE: ${{ inputs.probe_mode }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          FETCH_ATTEMPTS: ${{ inputs.fetch_attempts }}
+          MISSING_COUNT_ATTEMPTS: ${{ inputs.missing_count_attempts }}
+          MISSING_COUNT_SLEEP_SECONDS: ${{ inputs.missing_count_sleep_seconds }}
+          SLEEP_SECONDS: ${{ inputs.sleep_seconds }}
+          PROGRESS_INTERVAL: ${{ inputs.progress_interval }}
+          LOG_DIAGNOSTICS: ${{ inputs.log_diagnostics }}
+          UPLOAD_TO_DRIVE: ${{ inputs.upload_to_drive }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TARGET_DATE" =~ ^[0-9]{6}$ ]]; then echo "target_date must be 6 digits"; exit 1; fi
+          if [ -n "$SOURCE_RUN_ID" ] && ! [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]; then echo "source_run_id must be empty or numeric"; exit 1; fi
+          if ! [[ "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [ "$MAX_PARALLEL" -eq 0 ] || [ "$MAX_PARALLEL" -gt 20 ]; then echo "max_parallel must be 1..20"; exit 1; fi
+          if ! [[ "$SHARD_SIZE" =~ ^[0-9]+$ ]] || [ "$SHARD_SIZE" -eq 0 ]; then echo "shard_size must be positive"; exit 1; fi
+          if ! [[ "$TARGET_SHARD_COUNT" =~ ^[0-9]+$ ]] || [ "$TARGET_SHARD_COUNT" -gt 256 ]; then echo "target_shard_count must be 0..256"; exit 1; fi
+          if ! [[ "$MAX_ROWS" =~ ^[0-9]+$ ]]; then echo "max_rows must be non-negative"; exit 1; fi
+          case "$PROBE_MODE" in static|scrapling-dynamic|scrapling-stealth) ;; *) echo "invalid probe_mode"; exit 1 ;; esac
+          if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "timeout_seconds must be non-negative"; exit 1; fi
+          if ! [[ "$FETCH_ATTEMPTS" =~ ^[0-9]+$ ]] || [ "$FETCH_ATTEMPTS" -eq 0 ]; then echo "fetch_attempts must be positive"; exit 1; fi
+          if ! [[ "$MISSING_COUNT_ATTEMPTS" =~ ^[0-9]+$ ]] || [ "$MISSING_COUNT_ATTEMPTS" -eq 0 ]; then echo "missing_count_attempts must be positive"; exit 1; fi
+          if ! [[ "$MISSING_COUNT_SLEEP_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "missing_count_sleep_seconds must be non-negative"; exit 1; fi
+          if ! [[ "$SLEEP_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "sleep_seconds must be non-negative"; exit 1; fi
+          if ! [[ "$PROGRESS_INTERVAL" =~ ^[0-9]+$ ]]; then echo "progress_interval must be non-negative"; exit 1; fi
+          if [ "$LOG_DIAGNOSTICS" != "true" ] && [ "$LOG_DIAGNOSTICS" != "false" ]; then echo "log_diagnostics must be true or false"; exit 1; fi
+          if [ "$UPLOAD_TO_DRIVE" != "true" ]; then echo "public operational runs must upload to Drive"; exit 1; fi
+          for name in RUNS_REMOTE_DIR RCLONE_CONFIG_GDRIVE; do
+            if [ -z "${!name}" ]; then echo "::error::$name is required"; exit 1; fi
+          done
+
+      - name: Install rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes rclone
+
+      - name: Configure rclone remote
+        shell: bash
+        env:
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone"
+          printf '%s' "$RCLONE_CONFIG_GDRIVE" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          rclone listremotes | grep -q ':$'
+
+      - name: Download Drive lookup files
+        id: download
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          input_name="view-lookup-input-${TARGET_DATE}.csv"
+          map_name="view-lookup-map-${TARGET_DATE}.csv"
+          mkdir -p drive-inputs
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then return 1; fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          rclone_retry rclone --contimeout 10s --timeout 60s copyto "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/$input_name" "drive-inputs/$input_name"
+          rclone_retry rclone --contimeout 10s --timeout 60s copyto "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/$map_name" "drive-inputs/$map_name"
+          test -s "drive-inputs/$input_name"
+          test -s "drive-inputs/$map_name"
+          echo "input_path=drive-inputs/$input_name" >> "$GITHUB_OUTPUT"
+          echo "map_path=drive-inputs/$map_name" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare run state
+        id: state
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SHARD_SIZE: ${{ inputs.shard_size }}
+          TARGET_SHARD_COUNT: ${{ inputs.target_shard_count }}
+          MAX_ROWS: ${{ inputs.max_rows }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+          INPUT_PATH: ${{ steps.download.outputs.input_path }}
+          MAP_PATH: ${{ steps.download.outputs.map_path }}
+        run: |
+          set -euo pipefail
+          mkdir -p prepared shards
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then return 1; fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+
+          if [ -n "$SOURCE_RUN_ID" ]; then
+            mkdir -p previous_state
+            rclone_retry rclone --contimeout 10s --timeout 90s copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-retry-state/$SOURCE_RUN_ID" previous_state
+            python3 resolve_view_lookup_inputs.py prepare-retry \
+              --previous-state-dir previous_state \
+              --output-dir prepared \
+              --max-rows "$MAX_ROWS"
+          else
+            python3 resolve_view_lookup_inputs.py prepare-initial \
+              --input "$INPUT_PATH" \
+              --output-dir prepared \
+              --max-rows "$MAX_ROWS"
+          fi
+
+          cp "$MAP_PATH" "prepared/view-lookup-map-${TARGET_DATE}.csv"
+          python3 resolve_view_lookup_inputs.py split-shards \
+            --numbered prepared/numbered.txt \
+            --output-dir shards \
+            --shard-size "$SHARD_SIZE" \
+            --target-shard-count "$TARGET_SHARD_COUNT" \
+            --matrix-file prepared/matrix.json \
+            --summary-file prepared/split-summary.json
+
+          TOTAL_ROWS=$(python3 -c 'import json; print(json.load(open("prepared/split-summary.json"))["total_rows"])')
+          SHARD_COUNT=$(python3 -c 'import json; print(json.load(open("prepared/split-summary.json"))["shard_count"])')
+          SPLIT_MODE=$(python3 -c 'import json; print(json.load(open("prepared/split-summary.json"))["split_mode"])')
+          MATRIX=$(tr -d '\n' < prepared/matrix.json)
+          if [ "$TOTAL_ROWS" -gt 0 ]; then HAS_WORK=true; else HAS_WORK=false; fi
+
+          echo "has_work=$HAS_WORK" >> "$GITHUB_OUTPUT"
+          echo "total_rows=$TOTAL_ROWS" >> "$GITHUB_OUTPUT"
+          echo "shard_count=$SHARD_COUNT" >> "$GITHUB_OUTPUT"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          {
+            echo "### View metrics prepare"
+            echo "- rows queued: $TOTAL_ROWS"
+            echo "- shards: $SHARD_COUNT"
+            echo "- split mode: $SPLIT_MODE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload prepared state and shards to Drive
+        if: ${{ steps.state.outputs.has_work == 'true' || steps.state.outputs.has_work == 'false' }}
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then return 1; fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          prepared_destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-prepared/$GITHUB_RUN_ID"
+          shard_destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shards/$GITHUB_RUN_ID"
+          rclone_retry rclone mkdir "$prepared_destination"
+          rclone_retry rclone --contimeout 10s --timeout 90s copy prepared "$prepared_destination"
+          if compgen -G "shards/*.tsv" > /dev/null; then
+            rclone_retry rclone mkdir "$shard_destination"
+            rclone_retry rclone --contimeout 10s --timeout 90s copy shards "$shard_destination"
+          fi
+
+  probe:
+    name: probe shard ${{ matrix.shard }}
+    runs-on: ubuntu-22.04
+    needs: prepare
+    if: ${{ needs.prepare.outputs.has_work == 'true' }}
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Scrapling fetcher dependencies
+        if: ${{ inputs.probe_mode != 'static' }}
+        shell: bash
+        env:
+          PROBE_MODE: ${{ inputs.probe_mode }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "scrapling[fetchers]"
+          if [ "$PROBE_MODE" = "scrapling-stealth" ]; then
+            scrapling install
+          else
+            python3 -m playwright install --with-deps chromium
+          fi
+
+      - name: Install rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes rclone
+
+      - name: Configure rclone remote
+        shell: bash
+        env:
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone"
+          printf '%s' "$RCLONE_CONFIG_GDRIVE" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          rclone listremotes | grep -q ':$'
+
+      - name: Download shard input from Drive
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          SHARD: ${{ matrix.shard }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p shards
+          rclone copyto "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shards/$GITHUB_RUN_ID/shard-${SHARD}.tsv" "shards/shard-${SHARD}.tsv"
+          test -s "shards/shard-${SHARD}.tsv"
+
+      - name: Probe view metrics
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          FETCH_ATTEMPTS: ${{ inputs.fetch_attempts }}
+          MISSING_COUNT_ATTEMPTS: ${{ inputs.missing_count_attempts }}
+          MISSING_COUNT_SLEEP_SECONDS: ${{ inputs.missing_count_sleep_seconds }}
+          SLEEP_SECONDS: ${{ inputs.sleep_seconds }}
+          PROGRESS_INTERVAL: ${{ inputs.progress_interval }}
+          LOG_DIAGNOSTICS: ${{ inputs.log_diagnostics }}
+          PROBE_MODE: ${{ inputs.probe_mode }}
+        run: |
+          set -euo pipefail
+          mkdir -p shard-results
+          diagnostic_args=()
+          if [ "$LOG_DIAGNOSTICS" = "true" ]; then diagnostic_args=(--log-diagnostics); fi
+          python3 resolve_view_lookup_inputs.py probe-shard \
+            --input "shards/shard-${SHARD}.tsv" \
+            --output "shard-results/shard-${SHARD}.csv" \
+            --probe-mode "$PROBE_MODE" \
+            --timeout-seconds "$TIMEOUT_SECONDS" \
+            --fetch-attempts "$FETCH_ATTEMPTS" \
+            --missing-count-attempts "$MISSING_COUNT_ATTEMPTS" \
+            --missing-count-sleep-seconds "$MISSING_COUNT_SLEEP_SECONDS" \
+            --sleep-seconds "$SLEEP_SECONDS" \
+            --progress-interval "$PROGRESS_INTERVAL" \
+            "${diagnostic_args[@]}"
+
+      - name: Upload shard result to Drive
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          SHARD: ${{ matrix.shard }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shard-results/$GITHUB_RUN_ID"
+          rclone mkdir "$destination"
+          rclone copyto "shard-results/shard-${SHARD}.csv" "$destination/shard-${SHARD}.csv"
+
+  finalize:
+    name: merge and upload view metrics
+    runs-on: ubuntu-22.04
+    needs:
+      - prepare
+      - probe
+    if: ${{ always() && needs.prepare.result == 'success' && (needs.prepare.outputs.has_work != 'true' || needs.probe.result == 'success') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes rclone
+
+      - name: Configure rclone remote
+        shell: bash
+        env:
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone"
+          printf '%s' "$RCLONE_CONFIG_GDRIVE" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          rclone listremotes | grep -q ':$'
+
+      - name: Download prepared state and shard results from Drive
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+          HAS_WORK: ${{ needs.prepare.outputs.has_work }}
+        run: |
+          set -euo pipefail
+          mkdir -p prepared shard-results
+          rclone copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-prepared/$GITHUB_RUN_ID" prepared
+          if [ "$HAS_WORK" = "true" ]; then
+            rclone copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shard-results/$GITHUB_RUN_ID" shard-results
+            test -n "$(find shard-results -name 'shard-*.csv' -print -quit)"
+          fi
+
+      - name: Merge view metric results
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+        run: |
+          set -euo pipefail
+          mkdir -p view-results
+          python3 resolve_view_lookup_inputs.py merge \
+            --date "$TARGET_DATE" \
+            --all-input prepared/all_input.csv \
+            --map "prepared/view-lookup-map-${TARGET_DATE}.csv" \
+            --output-dir view-results \
+            --shard-results-dir shard-results \
+            --source-input-uri "view-lookup-input-${TARGET_DATE}.csv" \
+            --source-map-uri "view-lookup-map-${TARGET_DATE}.csv" \
+            --github-run-id "$GITHUB_RUN_ID" \
+            --github-sha "$GITHUB_SHA"
+
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          target_date = os.environ["TARGET_DATE"]
+          path = f"view-results/view-lookup-manifest-{target_date}.json"
+          with open(path, encoding="utf-8") as f:
+              manifest = json.load(f)
+          diagnostics = manifest.get("network_diagnostics") or {}
+          print("### View metrics merged results")
+          print(f"- total_rows: {manifest.get('total_rows')}")
+          print(f"- resolved_rows: {manifest.get('resolved_rows')}")
+          print(f"- retry_rows: {manifest.get('retry_rows')}")
+          print(f"- fetch_warning_rows: {diagnostics.get('fetch_warning_rows', 0)}")
+          PY
+
+      - name: Upload merged results and retry state to Drive
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
+          retry_destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-retry-state/$GITHUB_RUN_ID"
+          mkdir -p drive-upload
+          cp "view-results/view-lookup-results-${TARGET_DATE}.csv" drive-upload/
+          cp "view-results/threads-viewcount-${TARGET_DATE}.csv" drive-upload/
+          cp "view-results/view-lookup-manifest-${TARGET_DATE}.json" drive-upload/
+          rclone mkdir "$destination"
+          rclone copy drive-upload "$destination"
+          rclone mkdir "$retry_destination"
+          rclone copy view-results/retry-state "$retry_destination"

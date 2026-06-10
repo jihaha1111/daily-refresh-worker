@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sensitive string scan
+        run: python3 scripts/check_sensitive_strings.py
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests
+
+      - name: Compile Python entrypoints
+        run: |
+          python3 -m py_compile \
+            extract_coupang_body_link_enhanced.py \
+            analyze_coupang_performance.py \
+            prepare_lookup_inputs.py \
+            resolve_af_lookup_inputs.py \
+            resolve_view_lookup_inputs.py \
+            run_media_refresh_download.py \
+            prepare_media_refresh_queue.py \
+            sync_media_cache_drive.py \
+            normalize_media_cache_extensions.py \
+            src/threads_coupang_pipeline/*.py

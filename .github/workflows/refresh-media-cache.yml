@@ -1,0 +1,160 @@
+name: Refresh Media Cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Run date for Drive input/output filename"
+        required: true
+        default: "260531"
+      max_rows:
+        description: "Maximum queue rows to process; 0 means all rows"
+        required: true
+        default: "20"
+      max_parallel:
+        required: true
+        default: "6"
+      sleep_seconds:
+        required: true
+        default: "0"
+      timeout_seconds:
+        required: true
+        default: "20"
+      fetch_attempts:
+        required: true
+        default: "2"
+      performance_grades:
+        required: true
+        default: "Gold S A B"
+      content_scope:
+        required: true
+        default: "non_recipe"
+      upload_to_drive:
+        required: true
+        default: "true"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-media-cache-${{ inputs.target_date }}
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: refresh media cache
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate inputs and configuration
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          MAX_ROWS: ${{ inputs.max_rows }}
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          SLEEP_SECONDS: ${{ inputs.sleep_seconds }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          FETCH_ATTEMPTS: ${{ inputs.fetch_attempts }}
+          PERFORMANCE_GRADES: ${{ inputs.performance_grades }}
+          CONTENT_SCOPE: ${{ inputs.content_scope }}
+          UPLOAD_TO_DRIVE: ${{ inputs.upload_to_drive }}
+          RAW_REMOTE_DIR: ${{ vars.RAW_REMOTE_DIR }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+          MEDIA_CACHE_REMOTE_DIR: ${{ vars.MEDIA_CACHE_REMOTE_DIR }}
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TARGET_DATE" =~ ^[0-9]{6}$ ]]; then echo "target_date must be 6 digits"; exit 1; fi
+          if ! [[ "$MAX_ROWS" =~ ^[0-9]+$ ]]; then echo "max_rows must be a non-negative integer"; exit 1; fi
+          if ! [[ "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [ "$MAX_PARALLEL" -eq 0 ]; then echo "max_parallel must be positive"; exit 1; fi
+          if ! [[ "$SLEEP_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "sleep_seconds must be a non-negative number"; exit 1; fi
+          if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "timeout_seconds must be a non-negative number"; exit 1; fi
+          if ! [[ "$FETCH_ATTEMPTS" =~ ^[0-9]+$ ]] || [ "$FETCH_ATTEMPTS" -eq 0 ]; then echo "fetch_attempts must be positive"; exit 1; fi
+          case "$CONTENT_SCOPE" in all|non_recipe|recipe_only) ;; *) echo "invalid content_scope"; exit 1 ;; esac
+          if [ "$UPLOAD_TO_DRIVE" != "true" ]; then echo "operational media refresh must upload to Drive"; exit 1; fi
+          for name in RAW_REMOTE_DIR RUNS_REMOTE_DIR MEDIA_CACHE_REMOTE_DIR RCLONE_CONFIG_GDRIVE; do
+            if [ -z "${!name}" ]; then echo "::error::$name is required"; exit 1; fi
+          done
+
+      - name: Install rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes rclone
+
+      - name: Configure rclone remote
+        shell: bash
+        env:
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone"
+          printf '%s' "$RCLONE_CONFIG_GDRIVE" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          rclone listremotes | grep -q ':$'
+
+      - name: Run media refresh worker
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          MAX_ROWS: ${{ inputs.max_rows }}
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          SLEEP_SECONDS: ${{ inputs.sleep_seconds }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          FETCH_ATTEMPTS: ${{ inputs.fetch_attempts }}
+          PERFORMANCE_GRADES: ${{ inputs.performance_grades }}
+          CONTENT_SCOPE: ${{ inputs.content_scope }}
+          RAW_REMOTE_DIR: ${{ vars.RAW_REMOTE_DIR }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+          MEDIA_CACHE_REMOTE_DIR: ${{ vars.MEDIA_CACHE_REMOTE_DIR }}
+          SUMMARY_JSON: ${{ runner.temp }}/refresh-media-cache/media-refresh-worker-summary-${{ inputs.target_date }}.json
+        run: |
+          set -euo pipefail
+          work_root="$RUNNER_TEMP/refresh-media-cache"
+          summary_json="$work_root/media-refresh-worker-summary-${TARGET_DATE}.json"
+          mkdir -p "$work_root"
+          grade_args=()
+          for grade in $PERFORMANCE_GRADES; do grade_args+=("$grade"); done
+
+          python3 run_media_refresh_download.py \
+            --date "$TARGET_DATE" \
+            --drive-raw-dir "$RAW_REMOTE_DIR" \
+            --drive-runs-dir "$RUNS_REMOTE_DIR" \
+            --drive-media-cache-dir "$MEDIA_CACHE_REMOTE_DIR" \
+            --work-dir "$work_root/work" \
+            --output-dir "$work_root/outputs/$TARGET_DATE" \
+            --cache-root "$work_root/private/media-cache" \
+            --max-rows "$MAX_ROWS" \
+            --max-parallel "$MAX_PARALLEL" \
+            --sleep-seconds "$SLEEP_SECONDS" \
+            --timeout-seconds "$TIMEOUT_SECONDS" \
+            --fetch-attempts "$FETCH_ATTEMPTS" \
+            --performance-grades "${grade_args[@]}" \
+            --content-scope "$CONTENT_SCOPE" \
+            --summary-json "$summary_json" \
+            --upload-to-drive
+
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          path = os.environ["SUMMARY_JSON"]
+          with open(path, encoding="utf-8") as f:
+              result = json.load(f)
+          print("### Media refresh result")
+          print(f"- date: {result.get('date')}")
+          print(f"- processed_rows: {result.get('processed_rows')}")
+          print(f"- upload_to_drive: {result.get('upload_to_drive')}")
+          print("")
+          print("| Status | Rows |")
+          print("| --- | ---: |")
+          for status, count in sorted((result.get("status_counts") or {}).items()):
+              print(f"| {status} | {count} |")
+          PY

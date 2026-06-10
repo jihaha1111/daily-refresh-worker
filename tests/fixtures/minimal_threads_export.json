@@ -1,0 +1,207 @@
+[
+  {
+    "accessibility_caption": "May be an image of chicken skewers and text",
+    "caption": {
+      "text": "오늘 안주는 양념닭꼬치\n간단한 혼술안주 추천해줘"
+    },
+    "caption_is_edited": false,
+    "carousel_media": null,
+    "code": "BODY001",
+    "gen_ai_detection_method": {
+      "detection_method": "NONE"
+    },
+    "has_audio": null,
+    "id": "1001_501",
+    "image_versions2": {
+      "candidates": [
+        {
+          "height": 800,
+          "url": "https://example.test/images/body-large.jpg",
+          "width": 1200
+        },
+        {
+          "height": 400,
+          "url": "https://example.test/images/body-small.jpg",
+          "width": 600
+        }
+      ]
+    },
+    "like_count": 2,
+    "media_type": 1,
+    "original_height": 800,
+    "original_width": 1200,
+    "pk": "1001",
+    "taken_at": 1776783533,
+    "text_post_app_info": {
+      "can_reply": true,
+      "direct_reply_count": 1,
+      "is_reply": false,
+      "quote_count": 0,
+      "reply_control": "everyone",
+      "reply_to_author": null,
+      "repost_count": 0,
+      "reshare_count": null,
+      "self_thread_info": {
+        "id": null,
+        "post_position_in_self_thread": 1,
+        "self_thread_length": 2
+      },
+      "share_info": {
+        "can_quote_post": true
+      },
+      "tag_header": {
+        "display_name": "일상생활",
+        "id": "tag001",
+        "tag_cluster_name": "일상생활"
+      },
+      "text_fragments": {
+        "fragments": [
+          {
+            "fragment_type": "plaintext",
+            "plaintext": "오늘 안주는 양념닭꼬치\n간단한 혼술안주 추천해줘"
+          }
+        ]
+      }
+    },
+    "user": {
+      "full_name": "",
+      "id": "501",
+      "is_verified": false,
+      "pk": "501",
+      "profile_pic_url": "",
+      "text_post_app_is_private": false,
+      "username": "fixture_user"
+    },
+    "video_versions": null
+  },
+  {
+    "accessibility_caption": null,
+    "caption": {
+      "text": "(광고) 한번 사면 계속 쟁여놓게 됨\nhttps://link.coupang.com/a/test001\n이 포스팅은 쿠팡 파트너스 활동의 일환입니다."
+    },
+    "caption_is_edited": false,
+    "carousel_media": null,
+    "code": "LINK001",
+    "gen_ai_detection_method": {
+      "detection_method": "NONE"
+    },
+    "has_audio": null,
+    "id": "1002_501",
+    "image_versions2": {
+      "candidates": []
+    },
+    "like_count": 0,
+    "media_type": 19,
+    "original_height": 612,
+    "original_width": 612,
+    "pk": "1002",
+    "taken_at": 1776783533,
+    "text_post_app_info": {
+      "can_reply": true,
+      "direct_reply_count": 0,
+      "is_reply": true,
+      "quote_count": 0,
+      "reply_control": "everyone",
+      "reply_to_author": {
+        "id": "501",
+        "username": "fixture_user"
+      },
+      "repost_count": 0,
+      "reshare_count": null,
+      "self_thread_info": {
+        "id": null,
+        "post_position_in_self_thread": 2,
+        "self_thread_length": 2
+      },
+      "share_info": {
+        "can_quote_post": true
+      },
+      "tag_header": {
+        "display_name": "일상생활",
+        "id": "tag001",
+        "tag_cluster_name": "일상생활"
+      },
+      "text_fragments": {
+        "fragments": [
+          {
+            "fragment_type": "plaintext",
+            "plaintext": "(광고) 한번 사면 계속 쟁여놓게 됨\n"
+          },
+          {
+            "fragment_type": "link",
+            "link_fragment": {
+              "display_text": "link.coupang.com/a/test001",
+              "uri": "https://link.coupang.com/a/test001"
+            },
+            "plaintext": "https://link.coupang.com/a/test001"
+          }
+        ]
+      }
+    },
+    "user": {
+      "full_name": "",
+      "id": "501",
+      "is_verified": false,
+      "pk": "501",
+      "profile_pic_url": "",
+      "text_post_app_is_private": false,
+      "username": "fixture_user"
+    },
+    "video_versions": null
+  },
+  {
+    "accessibility_caption": null,
+    "caption": {
+      "text": "직접 링크 본문 https://link.coupang.com/a/direct001"
+    },
+    "caption_is_edited": false,
+    "carousel_media": null,
+    "code": "DIRECT001",
+    "gen_ai_detection_method": {
+      "detection_method": "NONE"
+    },
+    "has_audio": null,
+    "id": "1003_502",
+    "image_versions2": {
+      "candidates": []
+    },
+    "like_count": 0,
+    "media_type": 19,
+    "original_height": 612,
+    "original_width": 612,
+    "pk": "1003",
+    "taken_at": 1776783600,
+    "text_post_app_info": {
+      "can_reply": true,
+      "direct_reply_count": 0,
+      "is_reply": false,
+      "quote_count": 0,
+      "reply_control": "everyone",
+      "reply_to_author": null,
+      "repost_count": 0,
+      "reshare_count": null,
+      "self_thread_info": {
+        "id": null,
+        "post_position_in_self_thread": 1,
+        "self_thread_length": 1
+      },
+      "share_info": {
+        "can_quote_post": true
+      },
+      "tag_header": null,
+      "text_fragments": {
+        "fragments": []
+      }
+    },
+    "user": {
+      "full_name": "",
+      "id": "502",
+      "is_verified": false,
+      "pk": "502",
+      "profile_pic_url": "",
+      "text_post_app_is_private": false,
+      "username": "direct_user"
+    },
+    "video_versions": null
+  }
+]

@@ -1,0 +1,9 @@
+[project]
+name = "daily-refresh-worker"
+version = "0.1.0"
+description = "Public Drive-only ingestion worker for scheduled data refresh."
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.unittest]
+testpaths = ["tests"]

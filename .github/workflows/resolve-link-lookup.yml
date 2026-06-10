@@ -1,0 +1,157 @@
+name: Resolve Link Lookup
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Run date for Drive input/output filename"
+        required: true
+        default: "260430"
+      max_redirects:
+        required: true
+        default: "5"
+      sleep_seconds:
+        required: true
+        default: "0.25"
+      timeout_seconds:
+        required: true
+        default: "5"
+      max_workers:
+        required: true
+        default: "8"
+      progress_interval:
+        required: true
+        default: "25"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resolve-link-lookup-${{ inputs.target_date }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve link lookup
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate inputs and configuration
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          MAX_REDIRECTS: ${{ inputs.max_redirects }}
+          SLEEP_SECONDS: ${{ inputs.sleep_seconds }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          MAX_WORKERS: ${{ inputs.max_workers }}
+          PROGRESS_INTERVAL: ${{ inputs.progress_interval }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TARGET_DATE" =~ ^[0-9]{6}$ ]]; then echo "target_date must be 6 digits"; exit 1; fi
+          if ! [[ "$MAX_REDIRECTS" =~ ^[0-9]+$ ]]; then echo "max_redirects must be a non-negative integer"; exit 1; fi
+          if ! [[ "$SLEEP_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "sleep_seconds must be a non-negative number"; exit 1; fi
+          if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "timeout_seconds must be a non-negative number"; exit 1; fi
+          if ! [[ "$MAX_WORKERS" =~ ^[0-9]+$ ]] || [ "$MAX_WORKERS" -eq 0 ]; then echo "max_workers must be positive"; exit 1; fi
+          if ! [[ "$PROGRESS_INTERVAL" =~ ^[0-9]+$ ]]; then echo "progress_interval must be a non-negative integer"; exit 1; fi
+          for name in RUNS_REMOTE_DIR RCLONE_CONFIG_GDRIVE; do
+            if [ -z "${!name}" ]; then echo "::error::$name is required"; exit 1; fi
+          done
+
+      - name: Install rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes rclone
+
+      - name: Configure rclone remote
+        shell: bash
+        env:
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone"
+          printf '%s' "$RCLONE_CONFIG_GDRIVE" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          rclone listremotes | grep -q ':$'
+
+      - name: Download link lookup input
+        id: download
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          input_name="af-link-lookup-input-${TARGET_DATE}.csv"
+          input_path="$RUNNER_TEMP/$input_name"
+          input_uri="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/$input_name"
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then return 1; fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          rclone_retry rclone --contimeout 10s --timeout 60s copyto "$input_uri" "$input_path"
+          test -s "$input_path"
+          echo "input_path=$input_path" >> "$GITHUB_OUTPUT"
+          echo "input_name=$input_name" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve link lookup
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          MAX_REDIRECTS: ${{ inputs.max_redirects }}
+          SLEEP_SECONDS: ${{ inputs.sleep_seconds }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          MAX_WORKERS: ${{ inputs.max_workers }}
+          PROGRESS_INTERVAL: ${{ inputs.progress_interval }}
+          INPUT_PATH: ${{ steps.download.outputs.input_path }}
+          INPUT_NAME: ${{ steps.download.outputs.input_name }}
+        run: |
+          set -euo pipefail
+          python3 resolve_af_lookup_inputs.py \
+            --date "$TARGET_DATE" \
+            --input "$INPUT_PATH" \
+            --output-dir link-results \
+            --max-redirects "$MAX_REDIRECTS" \
+            --timeout-seconds "$TIMEOUT_SECONDS" \
+            --sleep-seconds "$SLEEP_SECONDS" \
+            --max-workers "$MAX_WORKERS" \
+            --progress-interval "$PROGRESS_INTERVAL" \
+            --source-uri "$INPUT_NAME" \
+            --github-run-id "$GITHUB_RUN_ID" \
+            --github-sha "$GITHUB_SHA"
+
+      - name: Upload link lookup results to Drive
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then return 1; fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          rclone_retry rclone --contimeout 10s --timeout 90s copy link-results "$destination"
