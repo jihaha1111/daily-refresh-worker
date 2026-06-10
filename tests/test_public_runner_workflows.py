@@ -43,7 +43,9 @@ class PublicRunnerWorkflowTests(unittest.TestCase):
         self.assertIn("view-shards/$GITHUB_RUN_ID", text)
         self.assertIn("view-shard-results/$GITHUB_RUN_ID", text)
         self.assertIn("view-retry-state/$GITHUB_RUN_ID", text)
-        self.assertIn("rclone copy", text)
+        self.assertIn("rclone_retry rclone", text)
+        self.assertIn(" copy ", text)
+        self.assertIn(" copyto ", text)
 
 
 if __name__ == "__main__":
