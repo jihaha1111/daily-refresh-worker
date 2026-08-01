@@ -65,6 +65,13 @@ For full operational runs use:
 - `log_diagnostics=false`
 - `upload_to_drive=true`
 
+The workflow pins `apify-fingerprint-datapoints==0.13.0` and smoke-imports
+the selected Scrapling fetcher before installing its browser runtime. This
+prevents a known header-generation import failure in the newer transitive
+dataset release. After merged results and retry state are uploaded to Drive,
+the workflow fails if every input row ended as `request_error` so an unusable
+data result cannot appear operationally successful.
+
 ## Media Expiry Policy
 
 Media URLs can expire. The media refresh worker preserves non-cached rows as warning metadata instead of failing the run. Expected warning statuses include `expired`, `forbidden`, `download_failed`, and `missing_source_url`.

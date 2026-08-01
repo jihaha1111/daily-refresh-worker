@@ -47,6 +47,16 @@ class PublicRunnerWorkflowTests(unittest.TestCase):
         self.assertIn(" copy ", text)
         self.assertIn(" copyto ", text)
 
+    def test_view_metrics_guards_scrapling_import_and_total_request_failure(self) -> None:
+        text = (WORKFLOWS / "resolve-view-metrics.yml").read_text(encoding="utf-8")
+        self.assertIn('"apify-fingerprint-datapoints==0.13.0"', text)
+        self.assertIn("from scrapling.fetchers import DynamicFetcher", text)
+        self.assertIn("from scrapling.fetchers import StealthyFetcher", text)
+        self.assertLess(
+            text.index("copy view-results/retry-state"),
+            text.index("all {total_rows} view metric rows ended as request_error"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
