@@ -295,10 +295,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip install --upgrade pip
-          python3 -m pip install "scrapling[fetchers]"
+          python3 -m pip install \
+            "scrapling[fetchers]" \
+            "apify-fingerprint-datapoints==0.13.0"
           if [ "$PROBE_MODE" = "scrapling-stealth" ]; then
+            python3 -c "from scrapling.fetchers import StealthyFetcher"
             scrapling install
           else
+            python3 -c "from scrapling.fetchers import DynamicFetcher"
             python3 -m playwright install --with-deps chromium
           fi
 
@@ -512,3 +516,27 @@ jobs:
           rclone_retry rclone --contimeout 10s --timeout 90s copy drive-upload "$destination"
           rclone_retry rclone mkdir "$retry_destination"
           rclone_retry rclone --contimeout 10s --timeout 90s copy view-results/retry-state "$retry_destination"
+
+      - name: Validate merged result
+        shell: bash
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          target_date = os.environ["TARGET_DATE"]
+          path = f"view-results/view-lookup-manifest-{target_date}.json"
+          with open(path, encoding="utf-8") as f:
+              manifest = json.load(f)
+
+          total_rows = int(manifest.get("total_rows") or 0)
+          request_error_rows = int((manifest.get("status_counts") or {}).get("request_error") or 0)
+          if total_rows > 0 and request_error_rows == total_rows:
+              raise SystemExit(
+                  f"all {total_rows} view metric rows ended as request_error; "
+                  "retry state was uploaded to Drive"
+              )
+          PY
