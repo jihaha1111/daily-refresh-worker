@@ -133,6 +133,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     previous_final_path = Path(args.previous_final) if args.previous_final else None
     shard_paths = find_shard_result_paths(Path(args.shard_results_dir)) if args.shard_results_dir else []
     extra_manifest = {
+        "lookup_scope": args.lookup_scope,
         "source_input_uri": args.source_input_uri or None,
         "source_map_uri": args.source_map_uri or None,
         "github_run_id": args.github_run_id or None,
@@ -200,7 +201,17 @@ def build_parser() -> argparse.ArgumentParser:
     probe_shard.set_defaults(func=cmd_probe_shard)
 
     merge = subparsers.add_parser("merge")
-    merge.add_argument("--date", required=True, help="YYMMDD export key.")
+    merge.add_argument(
+        "--date",
+        required=True,
+        help="Backward-compatible run key (YYMMDD for date scope).",
+    )
+    merge.add_argument(
+        "--lookup-scope",
+        choices=("date", "amazon_jp"),
+        default="date",
+        help="Lookup namespace recorded in the runner manifest.",
+    )
     merge.add_argument("--all-input", required=True, help="all_input.csv path.")
     merge.add_argument("--map", required=True, help="view-lookup-map-YYMMDD.csv path.")
     merge.add_argument("--output-dir", required=True, help="Output directory for merged files.")

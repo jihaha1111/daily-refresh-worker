@@ -62,6 +62,23 @@ class PublicRunnerWorkflowTests(unittest.TestCase):
         self.assertIn(" copy ", text)
         self.assertIn(" copyto ", text)
 
+    def test_view_metrics_preserves_date_scope_and_isolates_amazon_jp_scope(self) -> None:
+        text = (WORKFLOWS / "resolve-view-metrics.yml").read_text(encoding="utf-8")
+        self.assertIn('lookup_scope:', text)
+        self.assertIn('default: "date"', text)
+        self.assertIn('date)', text)
+        self.assertIn('if ! [[ "$TARGET_DATE" =~ ^[0-9]{6}$ ]]', text)
+        self.assertIn('${RUNS_REMOTE_DIR%/}/$TARGET_DATE', text)
+        self.assertIn(
+            '${RUNS_REMOTE_DIR%/}/amazon-jp/view-lookups/$TARGET_DATE', text
+        )
+        self.assertIn('amazon-jp-view-lookup-input-${TARGET_DATE}.csv', text)
+        self.assertIn(
+            'amazon-jp-view-lookup-runner-map-${TARGET_DATE}.csv', text
+        )
+        self.assertIn('--lookup-scope "$LOOKUP_SCOPE"', text)
+        self.assertIn('group: resolve-view-metrics-${{ inputs.lookup_scope }}-${{ inputs.target_date }}', text)
+
     def test_view_metrics_guards_scrapling_import_and_total_request_failure(self) -> None:
         text = (WORKFLOWS / "resolve-view-metrics.yml").read_text(encoding="utf-8")
         self.assertIn('"apify-fingerprint-datapoints==0.13.0"', text)

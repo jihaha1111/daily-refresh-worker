@@ -3,8 +3,12 @@ name: Resolve View Metrics
 on:
   workflow_dispatch:
     inputs:
+      lookup_scope:
+        description: "Lookup namespace: date or amazon_jp"
+        required: true
+        default: "date"
       target_date:
-        description: "Run date for Drive input/output filename"
+        description: "Backward-compatible run key; YYMMDD is required for date scope"
         required: true
         default: "260430"
       source_run_id:
@@ -68,7 +72,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: resolve-view-metrics-${{ inputs.target_date }}
+  group: resolve-view-metrics-${{ inputs.lookup_scope }}-${{ inputs.target_date }}
   cancel-in-progress: false
 
 jobs:
@@ -92,6 +96,7 @@ jobs:
       - name: Validate inputs and configuration
         shell: bash
         env:
+          LOOKUP_SCOPE: ${{ inputs.lookup_scope }}
           TARGET_DATE: ${{ inputs.target_date }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           MAX_PARALLEL: ${{ inputs.max_parallel }}
@@ -111,7 +116,15 @@ jobs:
           RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
         run: |
           set -euo pipefail
-          if ! [[ "$TARGET_DATE" =~ ^[0-9]{6}$ ]]; then echo "target_date must be 6 digits"; exit 1; fi
+          case "$LOOKUP_SCOPE" in
+            date)
+              if ! [[ "$TARGET_DATE" =~ ^[0-9]{6}$ ]]; then echo "target_date must be 6 digits for date scope"; exit 1; fi
+              ;;
+            amazon_jp)
+              if ! [[ "$TARGET_DATE" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]; then echo "target_date must be a lowercase safe run key for amazon_jp scope"; exit 1; fi
+              ;;
+            *) echo "lookup_scope must be date or amazon_jp"; exit 1 ;;
+          esac
           if [ -n "$SOURCE_RUN_ID" ] && ! [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]; then echo "source_run_id must be empty or numeric"; exit 1; fi
           if ! [[ "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [ "$MAX_PARALLEL" -eq 0 ] || [ "$MAX_PARALLEL" -gt 20 ]; then echo "max_parallel must be 1..20"; exit 1; fi
           if ! [[ "$SHARD_SIZE" =~ ^[0-9]+$ ]] || [ "$SHARD_SIZE" -eq 0 ]; then echo "shard_size must be positive"; exit 1; fi
@@ -152,12 +165,20 @@ jobs:
         id: download
         shell: bash
         env:
+          LOOKUP_SCOPE: ${{ inputs.lookup_scope }}
           TARGET_DATE: ${{ inputs.target_date }}
           RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
         run: |
           set -euo pipefail
-          input_name="view-lookup-input-${TARGET_DATE}.csv"
-          map_name="view-lookup-map-${TARGET_DATE}.csv"
+          if [ "$LOOKUP_SCOPE" = "amazon_jp" ]; then
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/amazon-jp/view-lookups/$TARGET_DATE"
+            input_name="amazon-jp-view-lookup-input-${TARGET_DATE}.csv"
+            map_name="amazon-jp-view-lookup-runner-map-${TARGET_DATE}.csv"
+          else
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
+            input_name="view-lookup-input-${TARGET_DATE}.csv"
+            map_name="view-lookup-map-${TARGET_DATE}.csv"
+          fi
           mkdir -p drive-inputs
           rclone_retry() {
             local attempt=1 max_attempts=5 delay=15
@@ -169,8 +190,8 @@ jobs:
               delay=$((delay * 2))
             done
           }
-          rclone_retry rclone --contimeout 10s --timeout 60s copyto "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/$input_name" "drive-inputs/$input_name"
-          rclone_retry rclone --contimeout 10s --timeout 60s copyto "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/$map_name" "drive-inputs/$map_name"
+          rclone_retry rclone --contimeout 10s --timeout 60s copyto "$run_remote_dir/$input_name" "drive-inputs/$input_name"
+          rclone_retry rclone --contimeout 10s --timeout 60s copyto "$run_remote_dir/$map_name" "drive-inputs/$map_name"
           test -s "drive-inputs/$input_name"
           test -s "drive-inputs/$map_name"
           echo "input_path=drive-inputs/$input_name" >> "$GITHUB_OUTPUT"
@@ -180,6 +201,7 @@ jobs:
         id: state
         shell: bash
         env:
+          LOOKUP_SCOPE: ${{ inputs.lookup_scope }}
           TARGET_DATE: ${{ inputs.target_date }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           SHARD_SIZE: ${{ inputs.shard_size }}
@@ -202,9 +224,15 @@ jobs:
             done
           }
 
+          if [ "$LOOKUP_SCOPE" = "amazon_jp" ]; then
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/amazon-jp/view-lookups/$TARGET_DATE"
+          else
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
+          fi
+
           if [ -n "$SOURCE_RUN_ID" ]; then
             mkdir -p previous_state
-            rclone_retry rclone --contimeout 10s --timeout 90s copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-retry-state/$SOURCE_RUN_ID" previous_state
+            rclone_retry rclone --contimeout 10s --timeout 90s copy "$run_remote_dir/view-retry-state/$SOURCE_RUN_ID" previous_state
             python3 resolve_view_lookup_inputs.py prepare-retry \
               --previous-state-dir previous_state \
               --output-dir prepared \
@@ -246,6 +274,7 @@ jobs:
         if: ${{ steps.state.outputs.has_work == 'true' || steps.state.outputs.has_work == 'false' }}
         shell: bash
         env:
+          LOOKUP_SCOPE: ${{ inputs.lookup_scope }}
           TARGET_DATE: ${{ inputs.target_date }}
           RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
         run: |
@@ -260,8 +289,13 @@ jobs:
               delay=$((delay * 2))
             done
           }
-          prepared_destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-prepared/$GITHUB_RUN_ID"
-          shard_destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shards/$GITHUB_RUN_ID"
+          if [ "$LOOKUP_SCOPE" = "amazon_jp" ]; then
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/amazon-jp/view-lookups/$TARGET_DATE"
+          else
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
+          fi
+          prepared_destination="$run_remote_dir/view-prepared/$GITHUB_RUN_ID"
+          shard_destination="$run_remote_dir/view-shards/$GITHUB_RUN_ID"
           rclone_retry rclone mkdir "$prepared_destination"
           rclone_retry rclone --contimeout 10s --timeout 90s copy prepared "$prepared_destination"
           if compgen -G "shards/*.tsv" > /dev/null; then
@@ -327,6 +361,7 @@ jobs:
       - name: Download shard input from Drive
         shell: bash
         env:
+          LOOKUP_SCOPE: ${{ inputs.lookup_scope }}
           TARGET_DATE: ${{ inputs.target_date }}
           SHARD: ${{ matrix.shard }}
           RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
@@ -343,7 +378,12 @@ jobs:
               delay=$((delay * 2))
             done
           }
-          rclone_retry rclone --contimeout 10s --timeout 90s copyto "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shards/$GITHUB_RUN_ID/shard-${SHARD}.tsv" "shards/shard-${SHARD}.tsv"
+          if [ "$LOOKUP_SCOPE" = "amazon_jp" ]; then
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/amazon-jp/view-lookups/$TARGET_DATE"
+          else
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
+          fi
+          rclone_retry rclone --contimeout 10s --timeout 90s copyto "$run_remote_dir/view-shards/$GITHUB_RUN_ID/shard-${SHARD}.tsv" "shards/shard-${SHARD}.tsv"
           test -s "shards/shard-${SHARD}.tsv"
 
       - name: Probe view metrics
@@ -378,12 +418,18 @@ jobs:
       - name: Upload shard result to Drive
         shell: bash
         env:
+          LOOKUP_SCOPE: ${{ inputs.lookup_scope }}
           TARGET_DATE: ${{ inputs.target_date }}
           SHARD: ${{ matrix.shard }}
           RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
         run: |
           set -euo pipefail
-          destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shard-results/$GITHUB_RUN_ID"
+          if [ "$LOOKUP_SCOPE" = "amazon_jp" ]; then
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/amazon-jp/view-lookups/$TARGET_DATE"
+          else
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
+          fi
+          destination="$run_remote_dir/view-shard-results/$GITHUB_RUN_ID"
           rclone_retry() {
             local attempt=1 max_attempts=5 delay=15
             until "$@"; do
@@ -434,6 +480,7 @@ jobs:
       - name: Download prepared state and shard results from Drive
         shell: bash
         env:
+          LOOKUP_SCOPE: ${{ inputs.lookup_scope }}
           TARGET_DATE: ${{ inputs.target_date }}
           RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
           HAS_WORK: ${{ needs.prepare.outputs.has_work }}
@@ -450,27 +497,34 @@ jobs:
               delay=$((delay * 2))
             done
           }
-          rclone_retry rclone --contimeout 10s --timeout 90s copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-prepared/$GITHUB_RUN_ID" prepared
+          if [ "$LOOKUP_SCOPE" = "amazon_jp" ]; then
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/amazon-jp/view-lookups/$TARGET_DATE"
+          else
+            run_remote_dir="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
+          fi
+          rclone_retry rclone --contimeout 10s --timeout 90s copy "$run_remote_dir/view-prepared/$GITHUB_RUN_ID" prepared
           if [ "$HAS_WORK" = "true" ]; then
-            rclone_retry rclone --contimeout 10s --timeout 90s copy "${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-shard-results/$GITHUB_RUN_ID" shard-results
+            rclone_retry rclone --contimeout 10s --timeout 90s copy "$run_remote_dir/view-shard-results/$GITHUB_RUN_ID" shard-results
             test -n "$(find shard-results -name 'shard-*.csv' -print -quit)"
           fi
 
       - name: Merge view metric results
         shell: bash
         env:
+          LOOKUP_SCOPE: ${{ inputs.lookup_scope }}
           TARGET_DATE: ${{ inputs.target_date }}
         run: |
           set -euo pipefail
           mkdir -p view-results
           python3 resolve_view_lookup_inputs.py merge \
             --date "$TARGET_DATE" \
+            --lookup-scope "$LOOKUP_SCOPE" \
             --all-input prepared/all_input.csv \
             --map "prepared/view-lookup-map-${TARGET_DATE}.csv" \
             --output-dir view-results \
             --shard-results-dir shard-results \
-            --source-input-uri "view-lookup-input-${TARGET_DATE}.csv" \
-            --source-map-uri "view-lookup-map-${TARGET_DATE}.csv" \
+            --source-input-uri "$([ "$LOOKUP_SCOPE" = "amazon_jp" ] && printf 'amazon-jp-view-lookup-input-%s.csv' "$TARGET_DATE" || printf 'view-lookup-input-%s.csv' "$TARGET_DATE")" \
+            --source-map-uri "$([ "$LOOKUP_SCOPE" = "amazon_jp" ] && printf 'amazon-jp-view-lookup-runner-map-%s.csv' "$TARGET_DATE" || printf 'view-lookup-map-%s.csv' "$TARGET_DATE")" \
             --github-run-id "$GITHUB_RUN_ID" \
             --github-sha "$GITHUB_SHA"
 
@@ -492,12 +546,17 @@ jobs:
       - name: Upload merged results and retry state to Drive
         shell: bash
         env:
+          LOOKUP_SCOPE: ${{ inputs.lookup_scope }}
           TARGET_DATE: ${{ inputs.target_date }}
           RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
         run: |
           set -euo pipefail
-          destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
-          retry_destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE/view-retry-state/$GITHUB_RUN_ID"
+          if [ "$LOOKUP_SCOPE" = "amazon_jp" ]; then
+            destination="${RUNS_REMOTE_DIR%/}/amazon-jp/view-lookups/$TARGET_DATE"
+          else
+            destination="${RUNS_REMOTE_DIR%/}/$TARGET_DATE"
+          fi
+          retry_destination="$destination/view-retry-state/$GITHUB_RUN_ID"
           mkdir -p drive-upload
           cp "view-results/view-lookup-results-${TARGET_DATE}.csv" drive-upload/
           cp "view-results/threads-viewcount-${TARGET_DATE}.csv" drive-upload/
