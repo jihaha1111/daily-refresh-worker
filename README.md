@@ -27,6 +27,14 @@ Run these Actions in order for a target `YYMMDD` date:
 3. `Resolve View Metrics`
 4. `Refresh Media Cache`
 
+Amazon marketplace resolution is an independent, optional flow. A private local
+repository first creates and uploads
+`amazon-marketplace-lookup-input-RUN_KEY.csv`; then run
+`Resolve Amazon Marketplace`. The Action writes only private Drive results and a
+sanitized aggregate step summary. It accepts exact `amzn.to` and `link.amazon`
+inputs, classifies only approved Amazon marketplace destinations, and records an
+Associates `tag` separately from marketplace confirmation.
+
 All operational input, shard, result, retry, and media artifacts are read from and written to Drive. Operational workflows must not use GitHub artifact storage.
 
 After the public Actions finish, run the private repository local DB load with `GH_REPO` pointing at this repository:
@@ -88,6 +96,7 @@ python3 -m py_compile \
   analyze_coupang_performance.py \
   prepare_lookup_inputs.py \
   resolve_af_lookup_inputs.py \
+  resolve_amazon_marketplace_lookup.py \
   resolve_view_lookup_inputs.py \
   run_media_refresh_download.py \
   prepare_media_refresh_queue.py \
