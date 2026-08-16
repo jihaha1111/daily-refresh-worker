@@ -30,6 +30,7 @@ jobs:
             analyze_coupang_performance.py \
             prepare_lookup_inputs.py \
             resolve_af_lookup_inputs.py \
+            resolve_amazon_marketplace_lookup.py \
             resolve_view_lookup_inputs.py \
             run_media_refresh_download.py \
             prepare_media_refresh_queue.py \

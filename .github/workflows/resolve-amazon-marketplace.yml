@@ -1,0 +1,207 @@
+name: Resolve Amazon Marketplace
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_key:
+        description: "Opaque private Drive run key, e.g. 260813-amazon-jp"
+        required: true
+        default: "260813-amazon-jp"
+      max_redirects:
+        required: true
+        default: "5"
+      timeout_seconds:
+        required: true
+        default: "10"
+      fetch_attempts:
+        required: true
+        default: "2"
+      retry_sleep_seconds:
+        required: true
+        default: "1"
+      sleep_seconds:
+        required: true
+        default: "0"
+      max_workers:
+        required: true
+        default: "8"
+      progress_interval:
+        required: true
+        default: "25"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resolve-amazon-marketplace-${{ inputs.run_key }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve Amazon marketplace evidence
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Validate inputs and configuration
+        shell: bash
+        env:
+          RUN_KEY: ${{ inputs.run_key }}
+          MAX_REDIRECTS: ${{ inputs.max_redirects }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          FETCH_ATTEMPTS: ${{ inputs.fetch_attempts }}
+          RETRY_SLEEP_SECONDS: ${{ inputs.retry_sleep_seconds }}
+          SLEEP_SECONDS: ${{ inputs.sleep_seconds }}
+          MAX_WORKERS: ${{ inputs.max_workers }}
+          PROGRESS_INTERVAL: ${{ inputs.progress_interval }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RUN_KEY" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]; then echo "run_key has an invalid shape"; exit 1; fi
+          if ! [[ "$MAX_REDIRECTS" =~ ^[0-9]+$ ]]; then echo "max_redirects must be non-negative"; exit 1; fi
+          if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "timeout_seconds must be positive"; exit 1; fi
+          if ! [[ "$FETCH_ATTEMPTS" =~ ^[0-9]+$ ]] || [ "$FETCH_ATTEMPTS" -eq 0 ]; then echo "fetch_attempts must be positive"; exit 1; fi
+          if ! [[ "$RETRY_SLEEP_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "retry_sleep_seconds must be non-negative"; exit 1; fi
+          if ! [[ "$SLEEP_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "sleep_seconds must be non-negative"; exit 1; fi
+          if ! [[ "$MAX_WORKERS" =~ ^[0-9]+$ ]] || [ "$MAX_WORKERS" -eq 0 ]; then echo "max_workers must be positive"; exit 1; fi
+          if ! [[ "$PROGRESS_INTERVAL" =~ ^[0-9]+$ ]]; then echo "progress_interval must be non-negative"; exit 1; fi
+          for name in RUNS_REMOTE_DIR RCLONE_CONFIG_GDRIVE; do
+            if [ -z "${!name}" ]; then echo "::error::$name is required"; exit 1; fi
+          done
+
+      - name: Install rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes rclone
+
+      - name: Configure rclone remote
+        shell: bash
+        env:
+          RCLONE_CONFIG_GDRIVE: ${{ secrets.RCLONE_CONFIG_GDRIVE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone"
+          printf '%s' "$RCLONE_CONFIG_GDRIVE" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          rclone listremotes | grep -q ':$'
+
+      - name: Download Amazon marketplace queue
+        id: download
+        shell: bash
+        env:
+          RUN_KEY: ${{ inputs.run_key }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          input_name="amazon-marketplace-lookup-input-${RUN_KEY}.csv"
+          input_path="$RUNNER_TEMP/$input_name"
+          input_uri="${RUNS_REMOTE_DIR%/}/$RUN_KEY/$input_name"
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            local log_file="$RUNNER_TEMP/amazon-marketplace-rclone-download.log"
+            until "$@" >"$log_file" 2>&1; do
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "::error::private Drive queue download failed after $attempt attempts"
+                return 1
+              fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          rclone_retry rclone --contimeout 10s --timeout 60s copyto "$input_uri" "$input_path"
+          test -s "$input_path"
+          echo "input_path=$input_path" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve Amazon marketplace evidence
+        id: resolve
+        shell: bash
+        env:
+          RUN_KEY: ${{ inputs.run_key }}
+          MAX_REDIRECTS: ${{ inputs.max_redirects }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          FETCH_ATTEMPTS: ${{ inputs.fetch_attempts }}
+          RETRY_SLEEP_SECONDS: ${{ inputs.retry_sleep_seconds }}
+          SLEEP_SECONDS: ${{ inputs.sleep_seconds }}
+          MAX_WORKERS: ${{ inputs.max_workers }}
+          PROGRESS_INTERVAL: ${{ inputs.progress_interval }}
+          INPUT_PATH: ${{ steps.download.outputs.input_path }}
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/amazon-marketplace-results"
+          report_path="$RUNNER_TEMP/amazon-marketplace-report.json"
+          python3 resolve_amazon_marketplace_lookup.py \
+            --run-key "$RUN_KEY" \
+            --input "$INPUT_PATH" \
+            --output-dir "$output_dir" \
+            --max-redirects "$MAX_REDIRECTS" \
+            --timeout-seconds "$TIMEOUT_SECONDS" \
+            --fetch-attempts "$FETCH_ATTEMPTS" \
+            --retry-sleep-seconds "$RETRY_SLEEP_SECONDS" \
+            --sleep-seconds "$SLEEP_SECONDS" \
+            --max-workers "$MAX_WORKERS" \
+            --progress-interval "$PROGRESS_INTERVAL" \
+            --github-run-id "$GITHUB_RUN_ID" \
+            --github-sha "$GITHUB_SHA" \
+            > "$report_path"
+          test -s "$output_dir/amazon-marketplace-lookup-results-${RUN_KEY}.csv"
+          test -s "$output_dir/amazon-marketplace-lookup-manifest-${RUN_KEY}.json"
+          echo "output_dir=$output_dir" >> "$GITHUB_OUTPUT"
+          echo "report_path=$report_path" >> "$GITHUB_OUTPUT"
+
+      - name: Write sanitized summary
+        shell: bash
+        env:
+          REPORT_PATH: ${{ steps.resolve.outputs.report_path }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(os.environ["REPORT_PATH"], encoding="utf-8") as handle:
+              report = json.load(handle)
+          counts = report["counts"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("## Amazon marketplace lookup\n\n")
+              handle.write(f"- input rows: {counts['input_rows']}\n")
+              handle.write(f"- marketplace confirmed: {counts['marketplace_confirmed_rows']}\n")
+              handle.write(f"- Japan marketplace: {counts['japan_marketplace_rows']}\n")
+              handle.write(f"- affiliate identity resolved: {counts['affiliate_identity_resolved_rows']}\n")
+              handle.write("- row evidence: private Drive output only\n")
+          PY
+
+      - name: Upload Amazon marketplace results to Drive
+        shell: bash
+        env:
+          RUN_KEY: ${{ inputs.run_key }}
+          RUNS_REMOTE_DIR: ${{ vars.RUNS_REMOTE_DIR }}
+          OUTPUT_DIR: ${{ steps.resolve.outputs.output_dir }}
+        run: |
+          set -euo pipefail
+          destination="${RUNS_REMOTE_DIR%/}/$RUN_KEY"
+          rclone_retry() {
+            local attempt=1 max_attempts=5 delay=15
+            local log_file="$RUNNER_TEMP/amazon-marketplace-rclone-upload.log"
+            until "$@" >"$log_file" 2>&1; do
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "::error::private Drive result upload failed after $attempt attempts"
+                return 1
+              fi
+              echo "rclone attempt $attempt failed; retrying in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          rclone_retry rclone --contimeout 10s --timeout 90s copy "$OUTPUT_DIR" "$destination"

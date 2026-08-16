@@ -23,6 +23,7 @@ class PublicRunnerWorkflowTests(unittest.TestCase):
             {
                 "ci.yml",
                 "prepare-lookup.yml",
+                "resolve-amazon-marketplace.yml",
                 "resolve-link-lookup.yml",
                 "resolve-view-metrics.yml",
                 "refresh-media-cache.yml",
@@ -30,6 +31,7 @@ class PublicRunnerWorkflowTests(unittest.TestCase):
         )
         for name in [
             "prepare-lookup.yml",
+            "resolve-amazon-marketplace.yml",
             "resolve-link-lookup.yml",
             "resolve-view-metrics.yml",
             "refresh-media-cache.yml",
@@ -37,6 +39,19 @@ class PublicRunnerWorkflowTests(unittest.TestCase):
             text = (WORKFLOWS / name).read_text(encoding="utf-8")
             self.assertIn("RCLONE_CONFIG_GDRIVE", text)
             self.assertIn("vars.", text)
+
+    def test_amazon_marketplace_resolution_is_drive_only_and_sanitized(self) -> None:
+        text = (WORKFLOWS / "resolve-amazon-marketplace.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("amazon-marketplace-lookup-input-${RUN_KEY}.csv", text)
+        self.assertIn('$RUNNER_TEMP/amazon-marketplace-results', text)
+        self.assertIn("RUNS_REMOTE_DIR", text)
+        self.assertIn("row evidence: private Drive output only", text)
+        self.assertIn("resolve_amazon_marketplace_lookup.py", text)
+        self.assertIn('>"$log_file" 2>&1', text)
+        self.assertNotIn("curl ", text)
+        self.assertNotIn("RUNS_FOLDER_ID", text)
 
     def test_view_metrics_is_drive_only(self) -> None:
         text = (WORKFLOWS / "resolve-view-metrics.yml").read_text(encoding="utf-8")
